@@ -50,7 +50,7 @@ from utils import (Dcm,
                    dice_coef,
                    save_images)
 
-from losses import (CrossEntropy, WeightedCrossEntropy)
+from losses import (CrossEntropy, WeightedCrossEntropy, DiceLoss, CEDice)
 
 
 
@@ -139,22 +139,39 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     return (net, optimizer, device, train_loader, val_loader, K)
 
 
-def runTraining(args):
-    print(f">>> Setting up to train on {args.dataset} with {args.mode}")
-    net, optimizer, device, train_loader, val_loader, K = setup(args)
-
+def setup_loss(args, K: int):
     if args.mode == "full":
-        loss_fn = CrossEntropy(idk=list(range(K)))  # Standard CE: background + foreground
-
-        # Weighted CE experiment:
-        # loss_fn = WeightedCrossEntropy(
-        #     idk=list(range(K)),
-        #     weights=class_weights
-        # )
+        idk = list(range(K))  # Supervise both background and foreground
     elif args.mode in ["partial"] and args.dataset == 'SEGTHOR':
-        loss_fn = CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
+        return CrossEntropy(idk=[0, 1, 3, 4])  # Do not supervise the heart (class 2)
     else:
         raise ValueError(args.mode, args.dataset)
+
+    # The background is ~99% of the pixels and sits at a permanent DSC of .998,
+    # so it is kept out of any Dice term: averaged in, it would only dilute the
+    # organs that term exists to rebalance. The cross-entropy still supervises it.
+    foreground = [k for k in idk if k != 0]
+
+    match args.loss:
+        case 'ce':
+            return CrossEntropy(idk=idk)
+        case 'wce':
+            # The weighted CE experiment, reachable through --loss instead of
+            # by uncommenting it here
+            return WeightedCrossEntropy(idk=idk, weights=class_weights)
+        case 'dice':
+            return DiceLoss(idk=foreground)
+        case 'cedice':
+            return CEDice(idk=idk)
+        case _:
+            raise ValueError(args.loss)
+
+
+def runTraining(args):
+    print(f">>> Setting up to train on {args.dataset} with {args.mode} and {args.loss}")
+    net, optimizer, device, train_loader, val_loader, K = setup(args)
+
+    loss_fn = setup_loss(args, K)
 
     # Notice one has the length of the _loader_, and the other one of the _dataset_
     log_loss_tra: Tensor = torch.zeros((args.epochs, len(train_loader)))
@@ -259,6 +276,9 @@ def main():
     parser.add_argument('--epochs', default=20, type=int)
     parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
+    parser.add_argument('--loss', default='ce', choices=['ce', 'wce', 'dice', 'cedice'],
+                        help="Training objective: cross-entropy (the baseline), class-weighted "
+                             "cross-entropy, soft Dice, or an equally weighted sum of CE and Dice.")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
