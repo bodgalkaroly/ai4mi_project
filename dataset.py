@@ -51,11 +51,11 @@ def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
 
 class SliceDataset(Dataset):
     def __init__(self, subset, root_dir, img_transform=None,
-                 gt_transform=None, augment=False, equalize=False, debug=False):
+                 gt_transform=None, augment=None, equalize=False, debug=False):
         self.root_dir: str = root_dir
         self.img_transform: Callable = img_transform
         self.gt_transform: Callable = gt_transform
-        self.augmentation: bool = augment
+        self.augmentation: Callable = augment   # changed to allow augmentation
         self.equalize: bool = equalize
 
         self.test_mode: bool = subset == 'test'
@@ -72,7 +72,12 @@ class SliceDataset(Dataset):
     def __getitem__(self, index) -> dict[str, Union[Tensor, int, str]]:
         img_path, gt_path = self.files[index]
 
-        img: Tensor = self.img_transform(Image.open(img_path))
+        img = Image.open(img_path).convert("L")     ## modification for augmentation
+
+        if self.augmentation is not None:
+            img = self.augmentation(img)
+
+        img: Tensor = self.img_transform(img) ##
 
         data_dict = {"images": img,
                      "stems": img_path.stem}
