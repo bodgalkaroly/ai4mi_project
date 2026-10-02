@@ -51,8 +51,7 @@ from utils import (Dcm,
                    save_images)
 
 from losses import (CrossEntropy, WeightedCrossEntropy, DiceLoss, CEDice)
-from augmentations import IntensityAugmentation
-
+from augmentations import IntensityAugmentation, GeometricAugmentation
 
 
 #!!! Inverse-square-root class-frequency weighting,
@@ -118,14 +117,14 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     B: int = datasets_params[args.dataset]['B']
     root_dir = Path("data") / args.dataset
 
-    # Online intensity augmentation for training only
-    intensity_augmentation = IntensityAugmentation(
-        noise_prob=0.5,
-        noise_std=0.03,
-        lowres_prob=0.3,
-        lowres_scale_range=(0.5, 0.75),
-        intensity_prob=0.5,
-        intensity_scale_range=(0.8, 1.2),
+    # Online geometric augmentation for training only
+    geometric_augmentation = GeometricAugmentation(
+        rotation_prob=0.5,
+        rotation_range=(-15, 15),
+        scaling_prob=0.5,
+        scaling_range=(0.9, 1.1),
+        translation_prob=0.5,
+        translation_range=(-0.1, 0.1),
     )
 
     train_set = SliceDataset(
@@ -133,7 +132,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         root_dir,
         img_transform=img_transform,
         gt_transform=partial(gt_transform, K),
-        augment=intensity_augmentation,
+        geometric_augment=geometric_augmentation,
         debug=args.debug,
     )
     train_loader = DataLoader(train_set,

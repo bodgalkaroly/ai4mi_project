@@ -50,12 +50,22 @@ def make_dataset(root, subset) -> list[tuple[Path, Path | None]]:
 
 
 class SliceDataset(Dataset):
-    def __init__(self, subset, root_dir, img_transform=None,
-                 gt_transform=None, augment=None, equalize=False, debug=False):
+    def __init__(
+            self,
+            subset,
+            root_dir,
+            img_transform=None,
+            gt_transform=None,
+            augment=None,
+            geometric_augment=None,
+            equalize=False,
+            debug=False
+    ):
         self.root_dir: str = root_dir
         self.img_transform: Callable = img_transform
         self.gt_transform: Callable = gt_transform
-        self.augmentation: Callable = augment   # changed to allow augmentation
+        self.intensity_augmentation: Callable = augment # added intensity augmentation
+        self.geometric_augmentation: Callable = geometric_augment   # added geometric augmentation
         self.equalize: bool = equalize
 
         self.test_mode: bool = subset == 'test'
@@ -72,21 +82,36 @@ class SliceDataset(Dataset):
     def __getitem__(self, index) -> dict[str, Union[Tensor, int, str]]:
         img_path, gt_path = self.files[index]
 
-        img = Image.open(img_path).convert("L")     ## modification for augmentation
+        # Load image
+        img = Image.open(img_path).convert("L")
 
-        if self.augmentation is not None:
-            img = self.augmentation(img)
+        # Load GT if available
+        if not self.test_mode:
+            gt = Image.open(gt_path).convert("L")
 
-        img: Tensor = self.img_transform(img) ##
+            # Geometric augmentation must be applied
+            # to image and GT using the same transformation.
+            if self.geometric_augmentation is not None:
+                img, gt = self.geometric_augmentation(img, gt)
 
-        data_dict = {"images": img,
-                     "stems": img_path.stem}
+        # Intensity augmentation is applied only to the image.
+        if self.intensity_augmentation is not None:
+            img = self.intensity_augmentation(img)
+
+        # Convert to tensors
+        img: Tensor = self.img_transform(img)
+
+        data_dict = {
+            "images": img,
+            "stems": img_path.stem
+        }
 
         if not self.test_mode:
-            gt: Tensor = self.gt_transform(Image.open(gt_path))
+            gt: Tensor = self.gt_transform(gt)
 
             _, W, H = img.shape
             K, _, _ = gt.shape
+
             assert gt.shape == (K, W, H)
 
             data_dict["gts"] = gt

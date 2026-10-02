@@ -185,43 +185,71 @@ class GeometricAugmentation:
         self.translation_prob = translation_prob
         self.translation_range = translation_range
 
-    def __call__(self, image):
+    def __call__(self, image, gt):
         image = self._to_pil(image)
+        gt = self._to_pil(gt)
 
+        # Generate the random parameters ONCE.
+        # They are then used for both image and GT.
         if random.random() < self.rotation_prob:
             angle = random.uniform(*self.rotation_range)
+
             image = image.rotate(
                 angle,
                 resample=Image.BILINEAR,
                 fillcolor=0,
             )
 
+            gt = gt.rotate(
+                angle,
+                resample=Image.NEAREST,
+                fillcolor=0,
+            )
+
         if random.random() < self.scaling_prob:
             scale = random.uniform(*self.scaling_range)
-            image = self._scale(image, scale)
+
+            image = self._scale(
+                image,
+                scale,
+                resample=Image.BILINEAR,
+            )
+
+            gt = self._scale(
+                gt,
+                scale,
+                resample=Image.NEAREST,
+            )
 
         if random.random() < self.translation_prob:
             tx = random.uniform(*self.translation_range)
             ty = random.uniform(*self.translation_range)
-            image = self._translate(image, tx, ty)
 
-        return image
+            image = self._translate(
+                image,
+                tx,
+                ty,
+                resample=Image.BILINEAR,
+            )
+
+            gt = self._translate(
+                gt,
+                tx,
+                ty,
+                resample=Image.NEAREST,
+            )
+
+        return image, gt
 
     @staticmethod
     def _to_pil(image):
         if isinstance(image, Image.Image):
-            return image.convert("L")
+            return image
 
-        image = np.asarray(image)
-
-        if image.dtype != np.uint8:
-            image = np.clip(image, 0, 1)
-            image = (image * 255).astype(np.uint8)
-
-        return Image.fromarray(image, mode="L")
+        return Image.fromarray(np.asarray(image))
 
     @staticmethod
-    def _scale(image, scale):
+    def _scale(image, scale, resample):
         width, height = image.size
 
         new_width = max(1, int(width * scale))
@@ -229,17 +257,22 @@ class GeometricAugmentation:
 
         scaled = image.resize(
             (new_width, new_height),
-            resample=Image.BILINEAR,
+            resample=resample,
         )
 
         if scale >= 1:
             left = (new_width - width) // 2
             top = (new_height - height) // 2
+
             return scaled.crop(
                 (left, top, left + width, top + height)
             )
 
-        canvas = Image.new("L", (width, height), 0)
+        canvas = Image.new(
+            image.mode,
+            (width, height),
+            0,
+        )
 
         left = (width - new_width) // 2
         top = (height - new_height) // 2
@@ -249,7 +282,7 @@ class GeometricAugmentation:
         return canvas
 
     @staticmethod
-    def _translate(image, tx, ty):
+    def _translate(image, tx, ty, resample):
         width, height = image.size
 
         shift_x = int(tx * width)
@@ -258,7 +291,8 @@ class GeometricAugmentation:
         return image.transform(
             (width, height),
             Image.AFFINE,
-            (1, 0, -shift_x, 0, 1, -shift_y),
-            resample=Image.BILINEAR,
+            (1, 0, -shift_x,
+             0, 1, -shift_y),
+            resample=resample,
             fillcolor=0,
         )
