@@ -127,11 +127,22 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
         translation_range=(-0.1, 0.1),
     )
 
+    # Online intensity augmentation for training only
+    intensity_augmentation = IntensityAugmentation(
+        noise_prob=0.5,
+        noise_std=0.03,
+        lowres_prob=0.3,
+        lowres_scale_range=(0.5, 0.75),
+        intensity_prob=0.5,
+        intensity_scale_range=(0.8, 1.2),
+    )
+
     train_set = SliceDataset(
         'train',
         root_dir,
         img_transform=img_transform,
         gt_transform=partial(gt_transform, K),
+        augment=intensity_augmentation,
         geometric_augment=geometric_augmentation,
         debug=args.debug,
     )
