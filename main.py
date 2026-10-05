@@ -42,6 +42,7 @@ from functools import partial
 from dataset import SliceDataset
 from ShallowNet import shallowCNN
 from ENet import ENet
+from UNetPlusPlus import UNetPlusPlus
 from utils import (Dcm,
                    class2one_hot,
                    probs2one_hot,
@@ -73,6 +74,12 @@ datasets_params["SEGTHOR_CLEAN"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, '
 datasets_params["SEGTHOR_CLEAN_FINAL"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 datasets_params["SEGTHOR_FULL_PREPROCESSED"] = {'K': 5, 'net': ENet, 'B': 8, 'kernels': 8, 'factor': 2}
 
+# Alternative architecture, picked with --net (without it, the dataset's
+# network above is used).
+networks: dict[str, tuple[type[nn.Module], dict[str, Any]]] = {
+    'unetpp': (UNetPlusPlus, {'kernels': 32}),
+}
+
 
 
 def img_transform(img):
@@ -102,7 +109,11 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
+    if args.net is None:
+        net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
+    else:
+        net_class, net_kwargs = networks[args.net]
+        net = net_class(1, K, **net_kwargs)
     net.init_weights()
     net.to(device)
 
@@ -280,6 +291,9 @@ def main():
     parser.add_argument('--loss', default='ce', choices=['ce', 'wce', 'dice', 'cedice'],
                         help="Training objective: cross-entropy (the baseline), class-weighted "
                              "cross-entropy, soft Dice, or an equally weighted sum of CE and Dice.")
+    parser.add_argument('--net', default=None, choices=networks.keys(),
+                        help="Architecture to train (see `networks` in main.py). Without it, the "
+                             "network of the dataset: ENet for SEGTHOR, the shallow CNN for TOY2.")
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
