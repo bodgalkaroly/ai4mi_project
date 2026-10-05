@@ -8,32 +8,15 @@ from PIL import Image
 
 class IntensityAugmentation:
     """
-    Online intensity augmentation for 2D CT images.
+    Online intensity augmentation for CT images.
 
-    The segmentation ground truth is not modified.
+    The same sampled augmentation parameters can be reused for
+    multiple images, which is required for 2.5D input stacks.
 
     Augmentations:
         1. Gaussian noise
         2. Simulated low resolution
         3. Intensity scaling
-
-    Parameters
-    ----------
-    noise_prob : float
-        Probability of applying Gaussian noise.
-    noise_std : float
-        Standard deviation of Gaussian noise, relative to an image
-        represented in the [0, 1] range.
-
-    lowres_prob : float
-        Probability of applying simulated low-resolution augmentation.
-    lowres_scale_range : tuple[float, float]
-        Range of downsampling factors.
-
-    intensity_prob : float
-        Probability of applying intensity scaling.
-    intensity_scale_range : tuple[float, float]
-        Range of multiplicative intensity factors.
     """
 
     def __init__(
@@ -54,31 +37,74 @@ class IntensityAugmentation:
         self.intensity_prob = intensity_prob
         self.intensity_scale_range = intensity_scale_range
 
-    def __call__(self, image):
+    # ------------------------------------------------------------------
+    # Random parameter sampling
+    # ------------------------------------------------------------------
+
+    def sample_params(self):
         """
-        Apply random intensity augmentations to an image.
+        Sample one set of random augmentation parameters.
+
+        The returned parameters can be reused for multiple images.
+        This is important for 2.5D, where all five neighbouring
+        slices must receive the same augmentation configuration.
+        """
+
+        apply_noise = random.random() < self.noise_prob
+        apply_lowres = random.random() < self.lowres_prob
+        apply_intensity = random.random() < self.intensity_prob
+
+        params = {
+            "apply_noise": apply_noise,
+            "apply_lowres": apply_lowres,
+            "apply_intensity": apply_intensity,
+            "lowres_scale": (
+                random.uniform(*self.lowres_scale_range)
+                if apply_lowres
+                else None
+            ),
+            "intensity_scale": (
+                random.uniform(*self.intensity_scale_range)
+                if apply_intensity
+                else None
+            ),
+        }
+
+        return params
+
+    # ------------------------------------------------------------------
+    # Apply previously sampled parameters
+    # ------------------------------------------------------------------
+
+    def apply(self, image, params):
+        """
+        Apply previously sampled augmentation parameters to an image.
 
         Parameters
         ----------
         image : PIL.Image or np.ndarray
             Single-channel CT image.
 
-        Returns
-        -------
-        PIL.Image
-            Augmented single-channel CT image.
+        params : dict
+            Parameters returned by sample_params().
         """
 
         image = self._to_float(image)
 
-        if random.random() < self.noise_prob:
+        if params["apply_noise"]:
             image = self._add_gaussian_noise(image)
 
-        if random.random() < self.lowres_prob:
-            image = self._simulate_low_resolution(image)
+        if params["apply_lowres"]:
+            image = self._simulate_low_resolution(
+                image,
+                scale=params["lowres_scale"],
+            )
 
-        if random.random() < self.intensity_prob:
-            image = self._scale_intensity(image)
+        if params["apply_intensity"]:
+            image = self._scale_intensity(
+                image,
+                scale=params["intensity_scale"],
+            )
 
         # Keep image values valid.
         image = np.clip(image, 0.0, 1.0)
@@ -87,6 +113,28 @@ class IntensityAugmentation:
             (image * 255).astype(np.uint8),
             mode="L",
         )
+
+    # ------------------------------------------------------------------
+    # Backwards-compatible 2D interface
+    # ------------------------------------------------------------------
+
+    def __call__(self, image):
+        """
+        Sample and apply one augmentation to a single image.
+
+        This preserves the original 2D behaviour.
+        """
+
+        params = self.sample_params()
+
+        return self.apply(
+            image,
+            params,
+        )
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _to_float(image):
@@ -108,8 +156,7 @@ class IntensityAugmentation:
         """
         Add intensity-dependent Gaussian noise.
 
-        The first term provides a small amount of noise everywhere.
-        The second term makes noise stronger in higher-intensity regions.
+        Noise is sampled independently for each image/slice.
         """
 
         noise_scale = (
@@ -125,23 +172,41 @@ class IntensityAugmentation:
 
         return image + noise
 
-    def _simulate_low_resolution(self, image):
+    def _simulate_low_resolution(
+        self,
+        image,
+        scale=None,
+    ):
         """
         Simulate reduced spatial resolution.
 
-        The image is downsampled and then upsampled back to its
-        original dimensions.
+        If scale is provided, it is used directly.
+        If not, a random scale is sampled.
+
+        The optional random sampling keeps this helper backwards
+        compatible with direct calls.
         """
 
-        scale = random.uniform(*self.lowres_scale_range)
+        if scale is None:
+            scale = random.uniform(*self.lowres_scale_range)
 
         height, width = image.shape[:2]
 
-        new_height = max(1, int(height * scale))
-        new_width = max(1, int(width * scale))
+        new_height = max(
+            1,
+            int(height * scale)
+        )
+        new_width = max(
+            1,
+            int(width * scale)
+        )
 
         image_pil = Image.fromarray(
-            np.clip(image * 255, 0, 255).astype(np.uint8),
+            np.clip(
+                image * 255,
+                0,
+                255
+            ).astype(np.uint8),
             mode="L",
         )
 
@@ -157,18 +222,43 @@ class IntensityAugmentation:
             resample=Image.BILINEAR,
         )
 
-        return np.asarray(image_pil).astype(np.float32) / 255.0
+        return (
+            np.asarray(image_pil)
+            .astype(np.float32)
+            / 255.0
+        )
 
-    def _scale_intensity(self, image):
+    def _scale_intensity(
+        self,
+        image,
+        scale=None,
+    ):
         """
         Randomly increase or decrease image intensity.
+
+        If scale is provided, it is used directly.
+        If not, a random scale is sampled.
         """
 
-        scale = random.uniform(*self.intensity_scale_range)
+        if scale is None:
+            scale = random.uniform(
+                *self.intensity_scale_range
+            )
 
         return image * scale
 
+
 class GeometricAugmentation:
+    """
+    Online geometric augmentation.
+
+    A single set of spatial parameters can be sampled and then
+    applied consistently to multiple images and masks.
+
+    This allows the same geometric transformation to be applied
+    to all five slices of a 2.5D input stack and to the center GT.
+    """
+
     def __init__(
         self,
         rotation_prob=0.5,
@@ -180,93 +270,233 @@ class GeometricAugmentation:
     ):
         self.rotation_prob = rotation_prob
         self.rotation_range = rotation_range
+
         self.scaling_prob = scaling_prob
         self.scaling_range = scaling_range
+
         self.translation_prob = translation_prob
         self.translation_range = translation_range
 
-    def __call__(self, image, gt):
+    # ------------------------------------------------------------------
+    # Random parameter sampling
+    # ------------------------------------------------------------------
+
+    def sample_params(self):
+        """
+        Sample one set of random geometric parameters.
+
+        These parameters should be reused for every slice in a
+        2.5D stack and for the corresponding center GT.
+        """
+
+        apply_rotation = (
+            random.random()
+            < self.rotation_prob
+        )
+
+        apply_scaling = (
+            random.random()
+            < self.scaling_prob
+        )
+
+        apply_translation = (
+            random.random()
+            < self.translation_prob
+        )
+
+        params = {
+            "apply_rotation": apply_rotation,
+            "angle": (
+                random.uniform(*self.rotation_range)
+                if apply_rotation
+                else None
+            ),
+
+            "apply_scaling": apply_scaling,
+            "scale": (
+                random.uniform(*self.scaling_range)
+                if apply_scaling
+                else None
+            ),
+
+            "apply_translation": apply_translation,
+            "tx": (
+                random.uniform(*self.translation_range)
+                if apply_translation
+                else None
+            ),
+            "ty": (
+                random.uniform(*self.translation_range)
+                if apply_translation
+                else None
+            ),
+        }
+
+        return params
+
+    # ------------------------------------------------------------------
+    # Apply previously sampled parameters
+    # ------------------------------------------------------------------
+
+    def apply(
+        self,
+        image,
+        params,
+        is_mask=False,
+    ):
+        """
+        Apply previously sampled geometric parameters.
+
+        Parameters
+        ----------
+        image : PIL.Image or np.ndarray
+            Image or segmentation mask.
+
+        params : dict
+            Parameters returned by sample_params().
+
+        is_mask : bool
+            True for GT masks, false for CT images.
+
+        Notes
+        -----
+        CT images use bilinear interpolation.
+        GT masks use nearest-neighbour interpolation.
+        """
+
         image = self._to_pil(image)
-        gt = self._to_pil(gt)
 
-        # Generate the random parameters ONCE.
-        # They are then used for both image and GT.
-        if random.random() < self.rotation_prob:
-            angle = random.uniform(*self.rotation_range)
+        resample = (
+            Image.NEAREST
+            if is_mask
+            else Image.BILINEAR
+        )
 
+        # --------------------------------------------------------------
+        # Rotation
+        # --------------------------------------------------------------
+
+        if params["apply_rotation"]:
             image = image.rotate(
-                angle,
-                resample=Image.BILINEAR,
+                params["angle"],
+                resample=resample,
                 fillcolor=0,
             )
 
-            gt = gt.rotate(
-                angle,
-                resample=Image.NEAREST,
-                fillcolor=0,
-            )
+        # --------------------------------------------------------------
+        # Scaling
+        # --------------------------------------------------------------
 
-        if random.random() < self.scaling_prob:
-            scale = random.uniform(*self.scaling_range)
-
+        if params["apply_scaling"]:
             image = self._scale(
                 image,
-                scale,
-                resample=Image.BILINEAR,
+                params["scale"],
+                resample=resample,
             )
 
-            gt = self._scale(
-                gt,
-                scale,
-                resample=Image.NEAREST,
-            )
+        # --------------------------------------------------------------
+        # Translation
+        # --------------------------------------------------------------
 
-        if random.random() < self.translation_prob:
-            tx = random.uniform(*self.translation_range)
-            ty = random.uniform(*self.translation_range)
-
+        if params["apply_translation"]:
             image = self._translate(
                 image,
-                tx,
-                ty,
-                resample=Image.BILINEAR,
+                params["tx"],
+                params["ty"],
+                resample=resample,
             )
 
-            gt = self._translate(
-                gt,
-                tx,
-                ty,
-                resample=Image.NEAREST,
-            )
+        return image
+
+    # ------------------------------------------------------------------
+    # Backwards-compatible 2D interface
+    # ------------------------------------------------------------------
+
+    def __call__(self, image, gt):
+        """
+        Sample one geometric transform and apply it to both image
+        and GT.
+
+        This preserves the original 2D behaviour.
+        """
+
+        params = self.sample_params()
+
+        image = self.apply(
+            image,
+            params,
+            is_mask=False,
+        )
+
+        gt = self.apply(
+            gt,
+            params,
+            is_mask=True,
+        )
 
         return image, gt
+
+    # ------------------------------------------------------------------
+    # Helper methods
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _to_pil(image):
         if isinstance(image, Image.Image):
             return image
 
-        return Image.fromarray(np.asarray(image))
+        return Image.fromarray(
+            np.asarray(image)
+        )
 
     @staticmethod
-    def _scale(image, scale, resample):
+    def _scale(
+        image,
+        scale,
+        resample,
+    ):
         width, height = image.size
 
-        new_width = max(1, int(width * scale))
-        new_height = max(1, int(height * scale))
+        new_width = max(
+            1,
+            int(width * scale)
+        )
+
+        new_height = max(
+            1,
+            int(height * scale)
+        )
 
         scaled = image.resize(
             (new_width, new_height),
             resample=resample,
         )
 
+        # --------------------------------------------------------------
+        # Scaling up: crop the center
+        # --------------------------------------------------------------
+
         if scale >= 1:
-            left = (new_width - width) // 2
-            top = (new_height - height) // 2
+            left = (
+                new_width - width
+            ) // 2
+
+            top = (
+                new_height - height
+            ) // 2
 
             return scaled.crop(
-                (left, top, left + width, top + height)
+                (
+                    left,
+                    top,
+                    left + width,
+                    top + height,
+                )
             )
+
+        # --------------------------------------------------------------
+        # Scaling down: paste centered on zero canvas
+        # --------------------------------------------------------------
 
         canvas = Image.new(
             image.mode,
@@ -274,15 +504,28 @@ class GeometricAugmentation:
             0,
         )
 
-        left = (width - new_width) // 2
-        top = (height - new_height) // 2
+        left = (
+            width - new_width
+        ) // 2
 
-        canvas.paste(scaled, (left, top))
+        top = (
+            height - new_height
+        ) // 2
+
+        canvas.paste(
+            scaled,
+            (left, top),
+        )
 
         return canvas
 
     @staticmethod
-    def _translate(image, tx, ty, resample):
+    def _translate(
+        image,
+        tx,
+        ty,
+        resample,
+    ):
         width, height = image.size
 
         shift_x = int(tx * width)
@@ -291,8 +534,14 @@ class GeometricAugmentation:
         return image.transform(
             (width, height),
             Image.AFFINE,
-            (1, 0, -shift_x,
-             0, 1, -shift_y),
+            (
+                1,
+                0,
+                -shift_x,
+                0,
+                1,
+                -shift_y,
+            ),
             resample=resample,
             fillcolor=0,
         )

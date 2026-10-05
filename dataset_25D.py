@@ -113,7 +113,6 @@ class SliceDataset(Dataset):
 
         patient_slices = self.patient_slices[patient_id]
 
-        # Find the position of the center slice in this patient's volume
         center_position = next(
             i
             for i, (slice_id, _, _) in enumerate(patient_slices)
@@ -137,26 +136,89 @@ class SliceDataset(Dataset):
 
             _, neighbor_img_path, _ = patient_slices[neighbor_position]
 
-            neighbor_img = Image.open(
-                neighbor_img_path
-            ).convert("L")
-
-            # Intensity augmentation, if used
-            if self.intensity_augmentation is not None:
-                neighbor_img = self.intensity_augmentation(
-                    neighbor_img
-                )
-
-            neighbor_img = self.img_transform(neighbor_img)
-
-            # img_transform returns [1, W, H]
-            neighbor_images.append(neighbor_img)
-
-        # Stack into [5, W, H]
-        img = torch.cat(neighbor_images, dim=0)
+            with Image.open(neighbor_img_path) as image:
+                neighbor_images.append(image.convert("L").copy())
 
         # ------------------------------------------------------------
         # Load GT of CENTER slice only
+        # ------------------------------------------------------------
+
+        gt = None
+
+        if not self.test_mode:
+            with Image.open(gt_path) as gt_image:
+                gt = gt_image.convert("L").copy()
+
+        # ------------------------------------------------------------
+        # Apply ONE shared geometric augmentation to the whole sample
+        #
+        # Same spatial transform:
+        #   z-2
+        #   z-1
+        #   z
+        #   z+1
+        #   z+2
+        # and center GT
+        # ------------------------------------------------------------
+
+        if self.geometric_augmentation is not None:
+            geometric_params = (
+                self.geometric_augmentation.sample_params()
+            )
+
+            neighbor_images = [
+                self.geometric_augmentation.apply(
+                    image,
+                    geometric_params,
+                    is_mask=False
+                )
+                for image in neighbor_images
+            ]
+
+            if gt is not None:
+                gt = self.geometric_augmentation.apply(
+                    gt,
+                    geometric_params,
+                    is_mask=True
+                )
+
+        # ------------------------------------------------------------
+        # Apply intensity augmentation
+        #
+        # One set of random augmentation parameters is sampled for
+        # the complete 5-slice stack.
+        #
+        # Pixel-wise Gaussian noise remains independently sampled
+        # for each slice when the augmentation is applied.
+        # ------------------------------------------------------------
+
+        if self.intensity_augmentation is not None:
+            intensity_params = (
+                self.intensity_augmentation.sample_params()
+            )
+
+            neighbor_images = [
+                self.intensity_augmentation.apply(
+                    image,
+                    intensity_params
+                )
+                for image in neighbor_images
+            ]
+
+        # ------------------------------------------------------------
+        # Convert the five slices to tensors
+        # ------------------------------------------------------------
+
+        neighbor_images = [
+            self.img_transform(image)
+            for image in neighbor_images
+        ]
+
+        # img_transform returns [1, W, H]
+        img = torch.cat(neighbor_images, dim=0)
+
+        # ------------------------------------------------------------
+        # Build output dictionary
         # ------------------------------------------------------------
 
         data_dict = {
@@ -164,13 +226,11 @@ class SliceDataset(Dataset):
             "stems": img_path.stem
         }
 
-        if not self.test_mode:
-            gt = Image.open(gt_path).convert("L")
+        # ------------------------------------------------------------
+        # Encode center GT
+        # ------------------------------------------------------------
 
-            # Geometric augmentation is deliberately not applied here.
-            # It requires a corresponding implementation for 5-channel
-            # 2.5D images.
-
+        if gt is not None:
             gt = self.gt_transform(gt)
 
             _, W, H = img.shape
