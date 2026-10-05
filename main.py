@@ -24,6 +24,9 @@
 
 import argparse
 import warnings
+import json
+import random
+import sys
 from typing import Any
 from pathlib import Path
 from pprint import pprint
@@ -86,7 +89,15 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     K: int = datasets_params[args.dataset]['K']
     kernels: int = datasets_params[args.dataset]['kernels'] if 'kernels' in datasets_params[args.dataset] else 8
     factor: int = datasets_params[args.dataset]['factor'] if 'factor' in datasets_params[args.dataset] else 2
-    net = datasets_params[args.dataset]['net'](1, K, kernels=kernels, factor=factor)
+    if args.model == 'transunet':
+        from TransUNet import CompactTransUNet
+        architecture = CompactTransUNet
+    elif args.model == 'swinunet':
+        from SwinUNet import CompactSwinUNet
+        architecture = CompactSwinUNet
+    else:
+        architecture = datasets_params[args.dataset]['net']
+    net = architecture(1, K, kernels=kernels, factor=factor)
     net.init_weights()
     net.to(device)
 
@@ -106,7 +117,7 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                              debug=args.debug)
     train_loader = DataLoader(train_set,
                               batch_size=B,
-                              num_workers=5,
+                              num_workers=args.workers,
                               shuffle=True)
 
     val_set = SliceDataset('val',
@@ -116,10 +127,18 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
                            debug=args.debug)
     val_loader = DataLoader(val_set,
                             batch_size=B,
-                            num_workers=5,
+                            num_workers=args.workers,
                             shuffle=False)
 
     args.dest.mkdir(parents=True, exist_ok=True)
+    metadata = {key: str(value) if isinstance(value, Path) else value
+                for key, value in vars(args).items()}
+    metadata.update(device=str(device), architecture=type(net).__name__,
+                    parameters=sum(p.numel() for p in net.parameters()),
+                    torch_version=torch.__version__, command=sys.argv,
+                    training_slices=len(train_set), validation_slices=len(val_set),
+                    learning_rate=lr)
+    (args.dest / 'config.json').write_text(json.dumps(metadata, indent=2))
 
     return (net, optimizer, device, train_loader, val_loader, K)
 
@@ -127,6 +146,9 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
 def runTraining(args):
     print(f">>> Setting up to train on {args.dataset} with {args.mode}")
     net, optimizer, device, train_loader, val_loader, K = setup(args)
+    metric_classes = args.metric_classes if args.metric_classes is not None else list(range(1, K))
+    if not metric_classes or any(k < 1 or k >= K for k in metric_classes):
+        raise ValueError('Metric classes must be foreground class indices for this dataset')
 
     if args.mode == "full":
         loss_fn = CrossEntropy(idk=list(range(K)))  # Supervise both background and foreground
@@ -202,7 +224,7 @@ def runTraining(args):
 
                     j += B  # Keep in mind that _in theory_, each batch might have a different size
                     # For the DSC average: do not take the background class (0) into account:
-                    postfix_dict: dict[str, str] = {"Dice": f"{log_dice[e, :j, 1:].mean():05.3f}",
+                    postfix_dict: dict[str, str] = {"Dice": f"{log_dice[e, :j, metric_classes].mean():05.3f}",
                                                     "Loss": f"{log_loss[e, :i + 1].mean():5.2e}"}
                     if K > 2:
                         postfix_dict |= {f"Dice-{k}": f"{log_dice[e, :j, k].mean():05.3f}"
@@ -215,7 +237,7 @@ def runTraining(args):
         np.save(args.dest / "loss_val.npy", log_loss_val)
         np.save(args.dest / "dice_val.npy", log_dice_val)
 
-        current_dice: float = log_dice_val[e, :, 1:].mean().item()
+        current_dice: float = log_dice_val[e, :, metric_classes].mean().item()
         if current_dice > best_dice:
             message = f">>> Improved dice at epoch {e}: {best_dice:05.3f}->{current_dice:05.3f} DSC"
             print(message)
@@ -232,21 +254,31 @@ def runTraining(args):
             torch.save(net.state_dict(), args.dest / "bestweights.pt")
 
 
-def main():
+def main(model='default'):
     parser = argparse.ArgumentParser()
+    parser.set_defaults(model=model)
 
     parser.add_argument('--epochs', default=20, type=int)
-    parser.add_argument('--dataset', default='TOY2', choices=datasets_params.keys())
+    parser.add_argument('--dataset', default='TOY2' if model == 'default' else 'SEGTHOR', choices=datasets_params.keys())
     parser.add_argument('--mode', default='full', choices=['partial', 'full'])
     parser.add_argument('--dest', type=Path, required=True,
                         help="Destination directory to save the results (predictions and weights).")
 
     parser.add_argument('--gpu', action='store_true')
+    parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--workers', type=int, default=5)
+    parser.add_argument('--metric-classes', type=int, nargs='+', default=None,
+                        help='Foreground classes used for mean Dice and best checkpoint selection.')
     parser.add_argument('--debug', action='store_true',
                         help="Keep only a fraction (10 samples) of the datasets, "
                              "to test the logics around epochs and logging easily.")
 
     args = parser.parse_args()
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
 
     pprint(args)
 
