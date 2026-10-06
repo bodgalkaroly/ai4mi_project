@@ -45,6 +45,7 @@ from dataset_25D import SliceDataset as SliceDataset25D
 from ShallowNet import shallowCNN
 from ENet import ENet as ENet2D
 from ENet_25D import ENet as ENet25D
+from UNetPlusPlus import UNetPlusPlus
 
 from augmentations import GeometricAugmentation, IntensityAugmentation
 
@@ -153,32 +154,40 @@ def setup(args) -> tuple[nn.Module, Any, Any, DataLoader, DataLoader, int]:
     if args.architecture == "2d":
 
         if args.dataset == "TOY2":
-            net_class = shallowCNN
+            dataset_class = SliceDataset2D
+            in_channels = 1
+            net_class = shallowCNN if args.net == "enet" else UNetPlusPlus
         else:
-            net_class = ENet2D
-
-        dataset_class = SliceDataset2D
-        in_channels = 1
+            dataset_class = SliceDataset2D
+            in_channels = 1
+            net_class = ENet2D if args.net == "enet" else UNetPlusPlus
 
     elif args.architecture == "2.5d":
 
         if args.dataset == "TOY2":
             raise ValueError("2.5D architecture is only intended for SEGTHOR datasets.")
 
-        net_class = ENet25D
         dataset_class = SliceDataset25D
         in_channels = 5
+        net_class = ENet25D if args.net == "enet" else UNetPlusPlus
 
     else:
         raise ValueError(args.architecture)
 
     # Build network
-    net = net_class(
-        in_channels,
-        K,
-        kernels=kernels,
-        factor=factor
-    )
+    if args.net == "unetpp":
+        net = UNetPlusPlus(
+            in_channels,
+            K,
+            kernels=32
+        )
+    else:
+        net = net_class(
+            in_channels,
+            K,
+            kernels=kernels,
+            factor=factor
+        )
 
     net.init_weights()
     net.to(device)
@@ -428,6 +437,13 @@ def main():
         default='2d',
         choices=['2d', '2.5d'],
         help="Segmentation architecture: standard 2D or 2.5D using 5 axial slices."
+    )
+
+    parser.add_argument(
+        '--net',
+        default='enet',
+        choices=['enet', 'unetpp'],
+        help="Network architecture: ENet or UNet++."
     )
 
     parser.add_argument(
