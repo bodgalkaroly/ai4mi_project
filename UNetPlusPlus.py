@@ -19,11 +19,6 @@ class UNetPlusPlus(nn.Module):
         self.depth: int = len(widths) - 1
 
         self.pool = nn.MaxPool2d(2)
-
-        # nodes[i][j] is the node X^{i,j} of the paper, j-th along level i (at
-        # 1/2^i of the input resolution). Nodes j = 0 are the encoder; a node
-        # j > 0 fuses all the previous nodes of its level with node j - 1 of the
-        # level below, upsampled by ups[i][j - 1]
         self.nodes = nn.ModuleList()
         self.ups = nn.ModuleList()
         for i, w in enumerate(widths):
@@ -38,12 +33,10 @@ class UNetPlusPlus(nn.Module):
         print(f"> Initialized {self.__class__.__name__} ({in_dim=}->{out_dim=}) with {kwargs}")
 
     def forward(self, input: Tensor) -> Tensor:
-        # X[i] holds the nodes of level i computed so far
         X: list[list[Tensor]] = [[self.nodes[0][0](input)]]
         for i in range(1, self.depth + 1):
             X.append([self.nodes[i][0](self.pool(X[i - 1][0]))])
 
-        # Column by column, as X^{i,j} needs X^{i+1,j-1}
         for j in range(1, self.depth + 1):
             for i in range(self.depth + 1 - j):
                 up = self.ups[i][j - 1](X[i + 1][j - 1])

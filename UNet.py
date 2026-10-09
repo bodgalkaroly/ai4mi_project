@@ -26,8 +26,6 @@ class UNet(nn.Module):
         self.pool = nn.MaxPool2d(2)
         self.encoders = nn.ModuleList(double_conv(i, o) for i, o in zip([in_dim] + widths[:-1], widths))
 
-        # Decoder, from the bottleneck up: the transposed convolution halves the
-        # channels, the concatenated skip connection brings them back
         self.ups = nn.ModuleList(nn.ConvTranspose2d(w * 2, w, kernel_size=2, stride=2)
                                  for w in reversed(widths[:-1]))
         self.decoders = nn.ModuleList(double_conv(w * 2, w) for w in reversed(widths[:-1]))
@@ -37,7 +35,6 @@ class UNet(nn.Module):
         print(f"> Initialized {self.__class__.__name__} ({in_dim=}->{out_dim=}) with {kwargs}")
 
     def encode(self, input: Tensor) -> list[Tensor]:
-        # Features of every level, full resolution first and bottleneck last
         features: list[Tensor] = [self.encoders[0](input)]
         for encoder in self.encoders[1:]:
             features.append(encoder(self.pool(features[-1])))
