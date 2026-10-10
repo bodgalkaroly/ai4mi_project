@@ -6,7 +6,6 @@ from torch import Tensor
 
 from ENet import random_weights_init
 
-
 def double_conv(in_dim: int, out_dim: int) -> nn.Sequential:
     return nn.Sequential(nn.Conv2d(in_dim, out_dim, kernel_size=3, padding=1, bias=False),
                          nn.BatchNorm2d(out_dim),
