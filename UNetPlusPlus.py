@@ -10,7 +10,6 @@ from torch import Tensor
 from ENet import random_weights_init
 from UNet import double_conv
 
-
 class UNetPlusPlus(nn.Module):
     def __init__(self, in_dim: int, out_dim: int, **kwargs):
         super().__init__()
