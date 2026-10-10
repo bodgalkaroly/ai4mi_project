@@ -29,6 +29,8 @@ from pathlib import Path
 from pprint import pprint
 from operator import itemgetter
 from shutil import copytree, rmtree
+import re
+from PIL import Image
 
 import torch
 import numpy as np
@@ -426,6 +428,106 @@ def runTraining(args):
             torch.save(net.state_dict(), args.dest / "bestweights.pt")
 
 
+def runInference(args):
+    """Run 2.5D inference on the preprocessed test PNG slices."""
+
+    if args.architecture != "2.5d":
+        raise ValueError("Inference requires --architecture 2.5d.")
+    if args.net != "unetpp":
+        raise ValueError("Inference requires --net unetpp.")
+
+    K = datasets_params[args.dataset]["K"]
+    image_dir = Path("data") / args.dataset / "test" / "img"
+    checkpoint_path = args.checkpoint or (args.dest / "bestweights.pt")
+    output_dir = args.dest / "test_pred_png"
+
+    if not image_dir.is_dir():
+        raise FileNotFoundError(f"Test images not found: {image_dir}")
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+    if output_dir.exists() and any(output_dir.glob("*.png")):
+        raise FileExistsError(
+            f"Predictions already exist in {output_dir}. "
+            "Move or remove the folder before rerunning."
+        )
+
+    # Group slices by patient.
+    patient_slices = {}
+    for path in image_dir.glob("Patient_*.png"):
+        match = re.fullmatch(r"(Patient_\d+)_([0-9]+)\.png", path.name)
+        if match is None:
+            raise ValueError(f"Unexpected slice filename: {path.name}")
+        patient_id, z = match.group(1), int(match.group(2))
+        patient_slices.setdefault(patient_id, []).append((z, path))
+
+    if not patient_slices:
+        raise FileNotFoundError(f"No test PNG slices found in {image_dir}")
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    print(f">> Inference device: {device}")
+    print(f">> Loading checkpoint: {checkpoint_path}")
+
+    # Recreate the same five-input-channel UNet++ used for training.
+    net = UNetPlusPlus(5, K, kernels=32).to(device)
+
+    try:
+        weights = torch.load(
+            checkpoint_path, map_location=device, weights_only=True
+        )
+    except TypeError:
+        weights = torch.load(checkpoint_path, map_location=device)
+
+    net.load_state_dict(weights)
+    net.eval()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    offsets = (-2, -1, 0, 1, 2)
+    total_saved = 0
+
+    with torch.inference_mode():
+        for patient_id in sorted(patient_slices):
+            entries = sorted(patient_slices[patient_id], key=lambda item: item[0])
+
+            if [z for z, _ in entries] != list(range(len(entries))):
+                raise ValueError(f"Nonconsecutive slice indices for {patient_id}")
+
+            paths = [path for _, path in entries]
+            images = np.stack([
+                np.asarray(Image.open(path).convert("L"), dtype=np.uint8)
+                for path in paths
+            ]).astype(np.float32) / 255.0
+
+            depth = len(paths)
+            print(f">> Predicting {patient_id}: {depth} slices")
+
+            for start in range(0, depth, args.inference_batch_size):
+                stop = min(start + args.inference_batch_size, depth)
+                centers = np.arange(start, stop)
+
+                # Build [batch, 5, height, width], replicating boundary slices.
+                context = np.stack([
+                    images[np.clip(centers + offset, 0, depth - 1)]
+                    for offset in offsets
+                ], axis=1)
+
+                x = torch.from_numpy(context).to(device=device)
+                logits = net(x)
+
+                if isinstance(logits, (tuple, list)):
+                    logits = logits[-1]
+
+                labels = logits.argmax(dim=1).cpu().numpy().astype(np.uint8)
+
+                for i, z in enumerate(range(start, stop)):
+                    # Encode class IDs 0–4 as PNG values 0, 63, 126, 189, 252.
+                    encoded = (labels[i] * 63).astype(np.uint8)
+                    Image.fromarray(encoded).save(output_dir / paths[z].name)
+                    total_saved += 1
+
+    print(">> Inference complete.")
+    print(f">> Saved {total_saved} PNG masks to: {output_dir}")
+
+
 def main():
     parser = argparse.ArgumentParser()
 
@@ -464,15 +566,41 @@ def main():
                         help="Destination directory to save the results (predictions and weights).")
 
     parser.add_argument('--gpu', action='store_true')
+
+    parser.add_argument(
+        '--inference',
+        action='store_true',
+        help='Run test inference instead of training.'
+    )
+    parser.add_argument(
+        '--checkpoint',
+        type=Path,
+        default=None,
+        help='Checkpoint path; defaults to <dest>/bestweights.pt.'
+    )
+    parser.add_argument(
+        '--inference_batch_size',
+        type=int,
+        default=8,
+        help='Number of test slices per inference batch.'
+    )
+
     parser.add_argument('--debug', action='store_true',
                         help="Keep only a fraction (10 samples) of the datasets, "
                              "to test the logics around epochs and logging easily.")
+
 
     args = parser.parse_args()
 
     pprint(args)
 
-    runTraining(args)
+    if args.inference:
+        if args.inference_batch_size < 1:
+            parser.error("--inference_batch_size must be at least 1")
+        runInference(args)
+    else:
+        runTraining(args)
+
 
 
 if __name__ == '__main__':
